@@ -13,4 +13,4 @@ doorways and windows
 3. Assign a rating to objects according to information security requirements for the location of cameras
 4. Perform an algorythm (genetic of brute force) to find a best (at least not worst) cameras placement
 
-Currently second half of overall code here. The first half contains code for deep neural network.
+Currently second half of overall code here. The first half contains code for deep neural network and will be loaded later.
