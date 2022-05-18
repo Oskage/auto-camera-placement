@@ -2,7 +2,7 @@
 
 ## Description
 
-I'm an information security student and this is my bachelor's thesis project. The main idea is write a program, 
+I'm an information security student and this is my bachelor's thesis project. The main idea is to write a program, 
 that can analyze a photo or an image of floorplan and automatically place cameras to protect objects.
 
 All steps of the algorythm here:
