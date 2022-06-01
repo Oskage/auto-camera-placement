@@ -3,8 +3,10 @@ import os.path as osp
 from collections import namedtuple
 from math import ceil
 from enum import IntEnum
+from random import randrange
 
 from skimage import draw
+from tqdm import tqdm
 import cv2
 import numpy as np
 import matplotlib.pyplot as plt
@@ -18,6 +20,13 @@ class Label(IntEnum):
 
 
 Point = namedtuple('Point', 'x y')
+
+VALUE_PER_POINT = 25
+LOCATION_COEFFICIENT = 50
+
+CAMERA_COLOR = np.array([0, 255, 0]) / 255
+VIEWED_AREA_COLOR = np.array([150, 143, 255]) / 255
+DEFENSE_POINT_COLOR = np.array([255, 0, 0]) / 255
 
 
 class PossibleLocations:
@@ -96,6 +105,72 @@ def plot_location(primitive_mask: np.ndarray, locations: PossibleLocations):
     plt.show()
 
 
+def plot_camera_view_area(
+        primitive_mask: np.ndarray,
+        view_point: Point
+):
+    mask = primitive_mask / 4
+    image = np.stack((mask, mask, mask), axis=2)
+
+    *viewed_points, _ = get_viewed_points_from_point(primitive_mask, view_point)
+
+    for y, x in zip(*viewed_points):
+        image[y, x] = VIEWED_AREA_COLOR
+
+    image[view_point.y, view_point.x] = CAMERA_COLOR
+    fig, axes = plt.subplots(figsize=(15, 15))
+    axes.imshow(image)
+    plt.show()
+
+
+def plot_camera_view_with_defense_point(
+        primitive_mask: np.ndarray,
+        camera_location: Point,
+        defense_point: Point
+):
+    mask = primitive_mask / 4
+    image = np.stack((mask, mask, mask), axis=2)
+
+    *viewed_points, _ = get_viewed_points_from_point(primitive_mask, camera_location)
+
+    for y, x in zip(*viewed_points):
+        image[y, x] = VIEWED_AREA_COLOR
+
+    image[camera_location.y, camera_location.x] = CAMERA_COLOR
+    image[defense_point.y, defense_point.x] = DEFENSE_POINT_COLOR
+    fig, axes = plt.subplots(figsize=(15, 15))
+    axes.imshow(image)
+    plt.show()
+
+
+def save_camera_view_with_defense_point(
+        primitive_mask: np.ndarray,
+        camera_location: Point,
+        defense_point: Point,
+        filename: str
+):
+    mask = primitive_mask / 4
+    image = np.stack((mask, mask, mask), axis=2)
+
+    *viewed_points, _ = get_viewed_points_from_point(primitive_mask, camera_location)
+
+    for y, x in zip(*viewed_points):
+        image[y, x] = VIEWED_AREA_COLOR
+
+    image[camera_location.y, camera_location.x] = CAMERA_COLOR
+    image[defense_point.y, defense_point.x] = DEFENSE_POINT_COLOR
+
+    pretty_image = (image * 255).astype(np.uint8)
+    pretty_image = cv2.cvtColor(pretty_image, cv2.COLOR_RGB2BGR)
+
+    scale_percent = 500
+    width = int(pretty_image.shape[1] * scale_percent / 100)
+    height = int(pretty_image.shape[0] * scale_percent / 100)
+    dim = (width, height)
+    pretty_image = cv2.resize(pretty_image, dim, interpolation=cv2.INTER_AREA)
+    cv2.imwrite(filename, pretty_image)
+
+
 def get_rectangle_boundary(
         start: tuple[int, int],
         end: tuple[int, int]
@@ -141,37 +216,13 @@ def draw_primitive_rectangles(
         image[rectangle_boundary] = color
 
 
-# def get_primitive_mask(
-#         mask: np.ndarray,
-#         rect_w: int = 5,
-#         rect_h: int = 5,
-#         frac: float = 0.1
-# ) -> np.ndarray:
-#     assert 0 < frac <= 1, f'Got {frac=}, but it must be in (0, 1]'
-#
-#     primitive_mask = np.zeros((mask.shape[0] // rect_h, mask.shape[1] // rect_w))
-#
-#     for y in range(0, mask.shape[0] - rect_h, rect_h):
-#         for x in range(0, mask.shape[1] - rect_w, rect_w):
-#             label_counter = Counter(np.ravel(mask[y: y + rect_h, x: x + rect_w]))
-#
-#             # Remove background
-#             if label_counter[0] / (rect_h * rect_w) > 1 - frac:
-#                 continue
-#
-#             most_common_label = label_counter.most_common(1)[0][0]
-#             primitive_mask[y // rect_h, x // rect_w] = most_common_label
-#
-#     return primitive_mask
-
-
 def get_primitive_mask_by_rectangles(
         mask: np.ndarray,
         rectangles: dict[Label, list[tuple[np.ndarray, np.ndarray]]],
         rect_w: int = 5,
         rect_h: int = 5
 ) -> np.ndarray:
-    primitive_mask = np.zeros((mask.shape[0] // rect_h, mask.shape[1] // rect_w))
+    primitive_mask = np.zeros((mask.shape[0] // rect_h, mask.shape[1] // rect_w), dtype=np.uint8)
     for label in Label:
         for rectangle in rectangles[label]:
             primitive_mask[rectangle[0][0] // rect_h, rectangle[1][0] // rect_w] = label.value
@@ -213,3 +264,121 @@ def get_neighbor_pixels_of_label(
         xs.append(point.x)
 
     return np.array(ys), np.array(xs)
+
+
+def remove_outer_locations(locations: PossibleLocations, primitive_mask: np.ndarray):
+    contours, _ = cv2.findContours(primitive_mask, mode=cv2.RETR_EXTERNAL,
+                                   method=cv2.CHAIN_APPROX_SIMPLE)
+
+    inner_ys = []
+    inner_xs = []
+    for y, x in zip(*locations.points):
+        for contour in contours:
+            if cv2.pointPolygonTest(contour, (int(x), int(y)), measureDist=False) > 0:
+                inner_ys.append(y)
+                inner_xs.append(x)
+
+    locations.points = (inner_ys, inner_xs)
+
+
+def edge_pixels_of_image(mask: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    # upper -> right -> bottom -> left edge
+    ys = np.concatenate((
+        np.full(mask.shape[1], fill_value=0, dtype=int),
+        np.arange(0, mask.shape[0], dtype=int),
+        np.full(mask.shape[1], fill_value=mask.shape[0] - 1, dtype=int),
+        np.arange(0, mask.shape[0], dtype=int)
+    ))
+    xs = np.concatenate((
+        np.arange(0, mask.shape[1], dtype=int),
+        np.full(mask.shape[0], fill_value=mask.shape[1] - 1, dtype=int),
+        np.arange(0, mask.shape[1], dtype=int),
+        np.full(mask.shape[0], fill_value=0, dtype=int)
+    ))
+
+    return ys, xs
+
+
+def get_viewed_points_from_point(
+        primitive_mask: np.ndarray,
+        point: Point
+) -> tuple[np.ndarray, np.ndarray, set[tuple[int, int]]]:
+    seen = set()
+    viewed_area_ys = []
+    viewed_area_xs = []
+
+    for edge_y, edge_x in zip(*edge_pixels_of_image(primitive_mask)):
+        line_ys, line_xs = draw.line(point.y, point.x, edge_y, edge_x)
+
+        for y, x in zip(line_ys, line_xs):
+            if primitive_mask[y, x] != 0:
+                break
+
+            if (y, x) in seen:
+                continue
+            seen.add((y, x))
+            viewed_area_ys.append(y)
+            viewed_area_xs.append(x)
+
+    return np.array(viewed_area_ys), np.array(viewed_area_xs), seen
+
+
+def compute_location_value(
+        primitive_mask: np.ndarray,
+        location: Point,
+        location_rating: int,
+        defense_point: Point
+) -> int | float:
+    value = LOCATION_COEFFICIENT * location_rating
+
+    *viewed_points, seen = get_viewed_points_from_point(primitive_mask, location)
+    if (defense_point.y, defense_point.x) not in seen:
+        return float('-inf')
+
+    value += VALUE_PER_POINT * len(viewed_points[0])
+
+    return value
+
+
+def find_best_location(
+        primitive_mask: np.ndarray,
+        locations: PossibleLocations,
+        defense_point: Point
+) -> Point:
+    max_value = float('-inf')
+    best_location = None
+
+    for location_y, location_x in tqdm(zip(*locations.points),
+                                       total=len(locations.points[0])):
+        location = Point(location_x, location_y)
+        value = compute_location_value(
+            primitive_mask,
+            location=location,
+            location_rating=locations.rating[(location_y, location_x)],
+            defense_point=defense_point)
+
+        if value > max_value:
+            max_value = value
+            best_location = location
+
+    return best_location
+
+
+def generate_random_defense_point(
+        primitive_mask: np.ndarray
+) -> Point:
+    def is_in_building(outer_contours: list[np.ndarray], y: int, x: int):
+        for contour in contours:
+            return (cv2.pointPolygonTest(contour, (int(x), int(y)), measureDist=False) > 0
+                    and primitive_mask[y, x] == 0)
+
+    contours, _ = cv2.findContours(primitive_mask, mode=cv2.RETR_EXTERNAL,
+                                   method=cv2.CHAIN_APPROX_SIMPLE)
+
+    random_y = randrange(primitive_mask.shape[0])
+    random_x = randrange(primitive_mask.shape[1])
+    while not is_in_building(contours, random_y, random_x):
+        random_y = randrange(primitive_mask.shape[0])
+        random_x = randrange(primitive_mask.shape[1])
+
+    return Point(random_x, random_y)
